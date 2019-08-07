@@ -38,28 +38,24 @@ class DetectedFace():
         """ Landmarks as XY """
         return self.landmarksXY
 
-    def to_bounding_box(self):
-        """ Return Bounding Box as BoundingBox """
-        left = self.x
-        top = self.y
-        right = self.x + self.w
-        bottom = self.y + self.h
-        retval = BoundingBox(left, top, right, bottom)
+    def to_bounding_box_dict(self):
+        """ Return Bounding Box as a bounding box dixt """
+        retval = dict(left=self.x, top=self.y, right=self.x + self.w, bottom=self.y + self.h)
         logger.trace("Returning: %s", retval)
         return retval
 
-    def from_bounding_box(self, bounding_box, image=None):
-        """ Set Bounding Box from a BoundingBox """
-        logger.trace("Creating from BoundingBox: %s", bounding_box)
-        if not isinstance(bounding_box, BoundingBox):
-            raise ValueError("Supplied Bounding Box is not a BoundingBox.")
-        self.x = bounding_box.left
-        self.w = bounding_box.width
-        self.y = bounding_box.top
-        self.h = bounding_box.height
+    def from_bounding_box_dict(self, bounding_box_dict, image=None):
+        """ Set Bounding Box from a bounding box dict """
+        logger.trace("Creating from bounding box dict: %s", bounding_box_dict)
+        if not isinstance(bounding_box_dict, dict):
+            raise ValueError("Supplied Bounding Box is not a dictionary.")
+        self.x = bounding_box_dict["left"]
+        self.w = bounding_box_dict["right"] - bounding_box_dict["left"]
+        self.y = bounding_box_dict["top"]
+        self.h = bounding_box_dict["bottom"] - bounding_box_dict["top"]
         if image is not None and image.any():
             self.image_to_face(image)
-        logger.trace("Created from BoundingBox: (x: %s, w: %s, y: %s. h: %s)",
+        logger.trace("Created from bounding box dict: (x: %s, w: %s, y: %s. h: %s)",
                      self.x, self.w, self.y, self.h)
 
     def image_to_face(self, image):
@@ -103,16 +99,20 @@ class DetectedFace():
         """ No need to load aligned information for all uses of this
             class, so only call this to load the information for easy
             reference to aligned properties for this face """
-        logger.trace("Loading aligned face: (size: %s, align_eyes: %s, dtype: %s)",
-                     size, align_eyes, dtype)
-        padding = int(size * self.extract_ratio) // 2
-        self.aligned["size"] = size
-        self.aligned["padding"] = padding
-        self.aligned["align_eyes"] = align_eyes
-        self.aligned["matrix"] = get_align_mat(self, size, align_eyes)
-        if image is None:
-            self.aligned["face"] = None
+        # Don't reload an already aligned face:
+        if self.aligned:
+            logger.trace("Skipping alignment calculation for already aligned face")
         else:
+            logger.trace("Loading aligned face: (size: %s, align_eyes: %s, dtype: %s)",
+                         size, align_eyes, dtype)
+            padding = int(size * self.extract_ratio) // 2
+            self.aligned["size"] = size
+            self.aligned["padding"] = padding
+            self.aligned["align_eyes"] = align_eyes
+            self.aligned["matrix"] = get_align_mat(self, size, align_eyes)
+            self.aligned["face"] = None
+        if image is not None and self.aligned["face"] is None:
+            logger.trace("Getting aligned face")
             face = AlignerExtract().transform(
                 image,
                 self.aligned["matrix"],
@@ -262,42 +262,3 @@ class DetectedFace():
     def reference_interpolators(self):
         """ Return the interpolators for an output face """
         return get_matrix_scaling(self.reference_matrix)
-
-
-class BoundingBox():
-    """ Bounding box class """
-    def __init__(self, left, top, right, bottom):
-        logger.trace("Initializing %s: (left: %s, top: %s, right: %s, bottom: %s)",
-                     self.__class__.__name__, left, top, right, bottom)
-        self._box = (left, top, right, bottom)
-        logger.trace("Initialized %s", self.__class__.__name__)
-
-    @property
-    def left(self):
-        """ Return left point as int """
-        return int(round(self._box[0]))
-
-    @property
-    def top(self):
-        """ Return top point as int """
-        return int(round(self._box[1]))
-
-    @property
-    def right(self):
-        """ Return right point as int """
-        return int(round(self._box[2]))
-
-    @property
-    def bottom(self):
-        """ Return bottom point as int """
-        return int(round(self._box[3]))
-
-    @property
-    def width(self):
-        """ Return width of bounding box """
-        return self.right - self.left
-
-    @property
-    def height(self):
-        """ Return height of bounding box """
-        return self.bottom - self.top

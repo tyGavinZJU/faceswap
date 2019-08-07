@@ -7,6 +7,7 @@ import os
 import sys
 from threading import Event
 
+from cv2 import imwrite  # pylint:disable=no-name-in-module
 import numpy as np
 from tqdm import tqdm
 
@@ -17,7 +18,7 @@ from lib.faces_detect import DetectedFace
 from lib.gpu_stats import GPUStats
 from lib.multithreading import MultiThread, PoolProcess, total_cpus
 from lib.queue_manager import queue_manager, QueueEmpty
-from lib.utils import get_folder, get_image_paths, hash_image_file
+from lib.utils import FaceswapError, get_folder, get_image_paths, hash_image_file
 from plugins.extract.pipeline import Extractor
 from plugins.plugin_loader import PluginLoader
 
@@ -55,11 +56,11 @@ class Convert():
 
     @property
     def queue_size(self):
-        """ Set q-size to double number of cpus available """
+        """ Set 16 for singleprocess otherwise 32 """
         if self.args.singleprocess:
-            retval = 2
+            retval = 16
         else:
-            retval = total_cpus() * 2
+            retval = 32
         logger.debug(retval)
         return retval
 
@@ -68,6 +69,8 @@ class Convert():
         """ return the maximum number of pooled processes to use """
         if self.args.singleprocess:
             retval = 1
+        elif self.args.jobs > 0:
+            retval = min(self.args.jobs, total_cpus(), self.images.images_found)
         else:
             retval = min(total_cpus(), self.images.images_found)
         retval = 1 if retval == 0 else retval
@@ -95,15 +98,23 @@ class Convert():
     def process(self):
         """ Process the conversion """
         logger.debug("Starting Conversion")
-        # queue_manager.debug_monitor(3)
-        self.convert_images()
-        self.disk_io.save_thread.join()
-        queue_manager.terminate_queues()
+        # queue_manager.debug_monitor(5)
+        try:
+            self.convert_images()
+            self.disk_io.save_thread.join()
+            queue_manager.terminate_queues()
 
-        Utils.finalize(self.images.images_found,
-                       self.predictor.faces_count,
-                       self.predictor.verify_output)
-        logger.debug("Completed Conversion")
+            Utils.finalize(self.images.images_found,
+                           self.predictor.faces_count,
+                           self.predictor.verify_output)
+            logger.debug("Completed Conversion")
+        except MemoryError as err:
+            msg = ("Faceswap ran out of RAM running convert. Conversion is very system RAM "
+                   "heavy, so this can happen in certain circumstances when you have a lot of "
+                   "cpus but not enough RAM to support them all."
+                   "\nYou should lower the number of processes in use by either setting the "
+                   "'singleprocess' flag (-sp) or lowering the number of parallel jobs (-j).")
+            raise FaceswapError(msg) from err
 
     def convert_images(self):
         """ Convert the images """
@@ -179,7 +190,7 @@ class DiskIO():
     @property
     def pre_encode(self):
         """ Return the writer's pre-encoder """
-        dummy = np.zeros((20, 20, 3)).astype("uint8")
+        dummy = np.zeros((20, 20, 3), dtype="uint8")
         test = self.writer.pre_encode(dummy)
         retval = None if test is None else self.writer.pre_encode
         logger.debug("Writer pre_encode function: %s", retval)
@@ -200,7 +211,7 @@ class DiskIO():
         """ Return the writer plugin """
         args = [self.args.output_dir]
         if self.args.writer in ("ffmpeg", "gif"):
-            args.append(self.total_count)
+            args.extend([self.total_count, self.frame_ranges])
         if self.args.writer == "ffmpeg":
             if self.images.is_video:
                 args.append(self.args.input_dir)
@@ -301,7 +312,8 @@ class DiskIO():
             if self.load_queue.shutdown.is_set():
                 logger.debug("Load Queue: Stop signal received. Terminating")
                 break
-            if image is None or not image.any():
+            if image is None or (not image.any() and image.ndim not in ((2, 3))):
+                # All black frames will return not np.any() so check dims too
                 logger.warning("Unable to open image. Skipping: '%s'", filename)
                 continue
             if self.check_skipframe(filename):
@@ -333,6 +345,7 @@ class DiskIO():
             return False
         idx = int(indices[0]) if indices else None
         skipframe = not any(map(lambda b: b[0] <= idx <= b[1], self.frame_ranges))
+        logger.trace("idx: %s, skipframe: %s", idx, skipframe)
         return skipframe
 
     def get_detected_faces(self, filename, image):
@@ -380,7 +393,7 @@ class DiskIO():
 
         for idx, face in enumerate(detected_faces):
             detected_face = DetectedFace()
-            detected_face.from_bounding_box(face)
+            detected_face.from_bounding_box_dict(face)
             detected_face.landmarksXY = landmarks[idx]
             final_faces.append(detected_face)
         return final_faces
@@ -389,7 +402,10 @@ class DiskIO():
     def save(self, completion_event):
         """ Save the converted images """
         logger.debug("Save Images: Start")
-        for _ in tqdm(range(self.total_count), desc="Converting", file=sys.stdout):
+        write_preview = self.args.redirect_gui and self.writer.is_stream
+        preview_image = os.path.join(self.writer.output_folder, ".gui_preview.jpg")
+        logger.debug("Write preview for gui: %s", write_preview)
+        for idx in tqdm(range(self.total_count), desc="Converting", file=sys.stdout):
             if self.save_queue.shutdown.is_set():
                 logger.debug("Save Queue: Stop signal received. Terminating")
                 break
@@ -398,6 +414,10 @@ class DiskIO():
                 logger.debug("EOF Received")
                 break
             filename, image = item
+            # Write out preview image for the GUI every 10 frames if writing to stream
+            if write_preview and idx % 10 == 0 and not os.path.exists(preview_image):
+                logger.debug("Writing GUI Preview image: '%s'", preview_image)
+                imwrite(preview_image, image)
             self.writer.write(filename, image)
         self.writer.close()
         completion_event.set()
@@ -417,6 +437,8 @@ class Predict():
         self.faces_count = 0
         self.verify_output = False
         self.model = self.load_model()
+        self.output_indices = {"face": self.model.largest_face_index,
+                               "mask": self.model.largest_mask_index}
         self.predictor = self.model.converter(self.args.swap_model)
         self.queues = dict()
 
@@ -442,9 +464,8 @@ class Predict():
     @property
     def input_mask(self):
         """ Return the input mask """
-        mask = np.zeros(self.model.state.mask_shapes[0], dtype="float32")
-        retval = np.expand_dims(mask, 0)
-        return retval
+        mask = np.zeros((1, ) + self.model.state.mask_shapes[0], dtype="float32")
+        return mask
 
     @property
     def has_predicted_mask(self):
@@ -593,11 +614,24 @@ class Predict():
         predicted = predicted if isinstance(predicted, list) else [predicted]
         logger.trace("Output shape(s): %s", [predict.shape for predict in predicted])
 
+        predicted = self.filter_multi_out(predicted)
+
         # Compile masks into alpha channel or keep raw faces
         predicted = np.concatenate(predicted, axis=-1) if len(predicted) == 2 else predicted[0]
         predicted = predicted.astype("float32")
 
         logger.trace("Final shape: %s", predicted.shape)
+        return predicted
+
+    def filter_multi_out(self, predicted):
+        """ Filter the predicted output to the final output """
+        if not predicted:
+            return predicted
+        face = predicted[self.output_indices["face"]]
+        mask_idx = self.output_indices["mask"]
+        mask = predicted[mask_idx] if mask_idx is not None else None
+        predicted = [face, mask] if mask is not None else [face]
+        logger.trace("Filtered output shape(s): %s", [predict.shape for predict in predicted])
         return predicted
 
     def queue_out_frames(self, batch, swapped_faces):

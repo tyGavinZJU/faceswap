@@ -11,7 +11,7 @@ from scipy.special import logsumexp
 import numpy as np
 
 from lib.multithreading import MultiThread
-from ._base import BoundingBox, Detector, logger
+from ._base import Detector, logger
 
 
 class Detect(Detector):
@@ -22,7 +22,7 @@ class Detect(Detector):
         super().__init__(git_model_id=git_model_id, model_filename=model_filename, **kwargs)
         self.name = "s3fd"
         self.target = (640, 640)  # Uses approx 4 GB of VRAM
-        self.vram = 4096
+        self.vram = 4224
         self.min_vram = 1024  # Will run at this with warnings
         self.model = None
 
@@ -106,12 +106,12 @@ class Detect(Detector):
     def process_output(self, faces, rotation_matrix, scale):
         """ Compile found faces for output """
         logger.trace("Processing Output: (faces: %s, rotation_matrix: %s)", faces, rotation_matrix)
-        faces = [BoundingBox(face[0], face[1], face[2], face[3]) for face in faces]
+        faces = [self.to_bounding_box_dict(face[0], face[1], face[2], face[3]) for face in faces]
         if isinstance(rotation_matrix, np.ndarray):
             faces = [self.rotate_rect(face, rotation_matrix)
                      for face in faces]
-        detected = [BoundingBox(face.left / scale, face.top / scale,
-                                face.right / scale, face.bottom / scale)
+        detected = [self.to_bounding_box_dict(face["left"] / scale, face["top"] / scale,
+                                              face["right"] / scale, face["bottom"] / scale)
                     for face in faces]
         logger.trace("Processed Output: %s", detected)
         return detected

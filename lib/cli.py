@@ -14,7 +14,7 @@ import textwrap
 from importlib import import_module
 
 from lib.logger import crash_log, log_setup
-from lib.utils import safe_shutdown
+from lib.utils import FaceswapError, safe_shutdown
 from lib.model.masks import get_available_masks, get_default_mask
 from plugins.plugin_loader import PluginLoader
 
@@ -49,18 +49,20 @@ class ScriptExecutor():
         max_ver = 1.13
         try:
             import tensorflow as tf
-        except ImportError:
-            logger.error("Tensorflow is a requirement but is not installed on your system.")
-            exit(1)
+        except ImportError as err:
+            raise FaceswapError("There was an error importing Tensorflow. This is most likely "
+                                "because you do not have TensorFlow installed, or you are trying "
+                                "to run tensorflow-gpu on a system without an Nvidia graphics "
+                                "card. Original import error: {}".format(str(err)))
         tf_ver = float(".".join(tf.__version__.split(".")[:2]))
         if tf_ver < min_ver:
-            logger.error("The minimum supported Tensorflow is version %s but you have version "
-                         "%s installed. Please upgrade Tensorflow.", min_ver, tf_ver)
-            exit(1)
+            raise FaceswapError("The minimum supported Tensorflow is version {} but you have "
+                                "version {} installed. Please upgrade Tensorflow.".format(
+                                    min_ver, tf_ver))
         if tf_ver > max_ver:
-            logger.error("The maximumum supported Tensorflow is version %s but you have version "
-                         "%s installed. Please downgrade Tensorflow.", max_ver, tf_ver)
-            exit(1)
+            raise FaceswapError("The maximumum supported Tensorflow is version {} but you have "
+                                "version {} installed. Please downgrade Tensorflow.".format(
+                                    max_ver, tf_ver))
         logger.debug("Installed Tensorflow Version: %s", tf_ver)
 
     def test_for_gui(self):
@@ -84,7 +86,7 @@ class ScriptExecutor():
             # pylint: disable=unused-variable
             import tkinter  # noqa pylint: disable=unused-import
         except ImportError:
-            logger.warning(
+            logger.error(
                 "It looks like TkInter isn't installed for your OS, so "
                 "the GUI has been disabled. To enable the GUI please "
                 "install the TkInter application. You can try:")
@@ -95,18 +97,17 @@ class ScriptExecutor():
             logger.info("Arch: sudo pacman -S tk")
             logger.info("CentOS/Redhat: sudo yum install tkinter")
             logger.info("Fedora: sudo dnf install python3-tkinter")
-            exit(1)
+            raise FaceswapError("TkInter not found")
 
     @staticmethod
     def check_display():
         """ Check whether there is a display to output the GUI. If running on
             Windows then assume not running in headless mode """
         if not os.environ.get("DISPLAY", None) and os.name != "nt":
-            logger.warning("No display detected. GUI mode has been disabled.")
             if platform.system() == "Darwin":
                 logger.info("macOS users need to install XQuartz. "
                             "See https://support.apple.com/en-gb/HT201341")
-            exit(1)
+            raise FaceswapError("No display detected. GUI mode has been disabled.")
 
     def execute_script(self, arguments):
         """ Run the script for called command """
@@ -122,6 +123,12 @@ class ScriptExecutor():
             script = self.import_script()
             process = script(arguments)
             process.process()
+        except FaceswapError as err:
+            for line in str(err).splitlines():
+                logger.error(line)
+            crash_file = crash_log()
+            logger.info("To get more information on this error see the crash report written to "
+                        "'%s'", crash_file)
         except KeyboardInterrupt:  # pylint: disable=try-except-raise
             raise
         except SystemExit:
@@ -129,7 +136,7 @@ class ScriptExecutor():
         except Exception:  # pylint: disable=broad-except
             crash_file = crash_log()
             logger.exception("Got Exception on main handler:")
-            logger.critical("An unexpected crash has occurred. Crash report written to %s. "
+            logger.critical("An unexpected crash has occurred. Crash report written to '%s'. "
                             "Please verify you are running the latest version of faceswap "
                             "before reporting", crash_file)
 
@@ -423,8 +430,7 @@ class FaceSwapArgs():
             command,
             help=description,
             description=description,
-            epilog="Questions and feedback: \
-            https://github.com/deepfakes/faceswap-playground",
+            epilog="Questions and feedback: https://faceswap.dev/forum",
             formatter_class=SmartFormatter)
         return parser
 
@@ -793,6 +799,21 @@ class ConvertArgs(ExtractConvertArgs):
                               "help": "Scale the final output frames by this amount. 100%% will "
                                       "output the frames at source dimensions. 50%% at half size "
                                       "200%% at double size"})
+        argument_list.append({"opts": ("-j", "--jobs"),
+                              "dest": "jobs",
+                              "action": Slider,
+                              "type": int,
+                              "default": 0,
+                              "min_max": (0, 40),
+                              "rounding": 1,
+                              "help": "The maximum number of parallel processes for performing "
+                                      "conversion. Converting images is system RAM heavy so it is "
+                                      "possible to run out of memory if you have a lot of "
+                                      "processes and not enough RAM to accomodate them all. "
+                                      "Setting this to 0 will use the maximum available. No "
+                                      "matter what you set this to, it will never attempt to use "
+                                      "more processes than are available on your system. If "
+                                      "singleprocess is enabled this setting will be ignored."})
         argument_list.append({"opts": ("-g", "--gpus"),
                               "type": int,
                               "action": Slider,
@@ -849,12 +870,6 @@ class TrainArgs(FaceSwapArgs):
                               "required": True,
                               "help": "Input directory. A directory containing training images "
                                       "for face A."})
-        argument_list.append({"opts": ("-B", "--input-B"),
-                              "action": DirFullPaths,
-                              "dest": "input_b",
-                              "required": True,
-                              "help": "Input directory. A directory containing training images "
-                                      "for face B."})
         argument_list.append({"opts": ("-ala", "--alignments-A"),
                               "action": FileFullPaths,
                               "filetypes": 'alignments',
@@ -865,6 +880,23 @@ class TrainArgs(FaceSwapArgs):
                                       "if you are using a masked model or warp-to-landmarks is "
                                       "enabled. Defaults to <input-A>/alignments.json if not "
                                       "provided."})
+        argument_list.append({"opts": ("-tia", "--timelapse-input-A"),
+                              "action": DirFullPaths,
+                              "dest": "timelapse_input_a",
+                              "default": None,
+                              "help": "For if you want a timelapse: "
+                                      "The input folder for the timelapse. "
+                                      "This folder should contain faces of A "
+                                      "which will be converted for the "
+                                      "timelapse. You must supply a "
+                                      "--timelapse-output and a "
+                                      "--timelapse-input-B parameter."})
+        argument_list.append({"opts": ("-B", "--input-B"),
+                              "action": DirFullPaths,
+                              "dest": "input_b",
+                              "required": True,
+                              "help": "Input directory. A directory containing training images "
+                                      "for face B."})
         argument_list.append({"opts": ("-alb", "--alignments-B"),
                               "action": FileFullPaths,
                               "filetypes": 'alignments',
@@ -875,12 +907,17 @@ class TrainArgs(FaceSwapArgs):
                                       "if you are using a masked model or warp-to-landmarks is "
                                       "enabled. Defaults to <input-B>/alignments.json if not "
                                       "provided."})
-        argument_list.append({"opts": ("-m", "--model-dir"),
+        argument_list.append({"opts": ("-tib", "--timelapse-input-B"),
                               "action": DirFullPaths,
-                              "dest": "model_dir",
-                              "required": True,
-                              "help": "Model directory. This is where the training data will be "
-                                      "stored."})
+                              "dest": "timelapse_input_b",
+                              "default": None,
+                              "help": "For if you want a timelapse: "
+                                      "The input folder for the timelapse. "
+                                      "This folder should contain faces of B "
+                                      "which will be converted for the "
+                                      "timelapse. You must supply a "
+                                      "--timelapse-output and a "
+                                      "--timelapse-input-A parameter."})
         argument_list.append({"opts": ("-t", "--trainer"),
                               "action": Radio,
                               "type": str.lower,
@@ -897,15 +934,30 @@ class TrainArgs(FaceSwapArgs):
                                       "\nL|lightweight: A lightweight model for low-end cards. "
                                       "Don't expect great results. Can train as low as 1.6GB "
                                       "with batch size 8."
-                                      "\nL|realface: Customizable in/out resolution model "
-                                      "from andenixa. The autoencoders are unbalanced so B>A "
-                                      "swaps won't work so well. Very configurable."
+                                      "\nL|realface: A high detail, dual density model based on "
+                                      "DFaker, with customizable in/out resolution. The "
+                                      "autoencoders are unbalanced so B>A swaps won't work "
+                                      "so well. By andenixa et al. Very configurable."
                                       "\nL|unbalanced: 128px in/out model from andenixa. The "
                                       "autoencoders are unbalanced so B>A swaps won't work so "
                                       "well. Very configurable."
                                       "\nL|villain: 128px in/out model from villainguy. Very "
                                       "resource hungry (11GB for batchsize 16). Good for "
                                       "details, but more susceptible to color differences."})
+        argument_list.append({"opts": ("-to", "--timelapse-output"),
+                              "action": DirFullPaths,
+                              "dest": "timelapse_output",
+                              "default": None,
+                              "help": "The output folder for the timelapse. "
+                                      "If the input folders are supplied but "
+                                      "no output folder, it will default to "
+                                      "your model folder /timelapse/"})
+        argument_list.append({"opts": ("-m", "--model-dir"),
+                              "action": DirFullPaths,
+                              "dest": "model_dir",
+                              "required": True,
+                              "help": "Model directory. This is where the training data will be "
+                                      "stored."})
         argument_list.append({"opts": ("-s", "--save-interval"),
                               "type": int,
                               "action": Slider,
@@ -978,25 +1030,33 @@ class TrainArgs(FaceSwapArgs):
                               "help": "Disables TensorBoard logging. NB: Disabling logs means "
                                       "that you will not be able to use the graph or analysis "
                                       "for this session in the GUI."})
-        argument_list.append({"opts": ("-pp", "--ping-pong"),
-                              "action": "store_true",
-                              "dest": "pingpong",
-                              "default": False,
-                              "help": "Enable ping pong training. Trains one side at a time, "
-                                      "switching sides at each save iteration. Training will take "
-                                      "2 to 4 times longer, with about a 30%%-50%% reduction in "
-                                      "VRAM useage. NB: Preview won't show until both sides have "
-                                      "been trained once."})
         argument_list.append({"opts": ("-msg", "--memory-saving-gradients"),
                               "action": "store_true",
                               "dest": "memory_saving_gradients",
                               "default": False,
-                              "help": "Trades off VRAM useage against computation time. Can fit "
-                                      "larger models into memory at a cost of slower training "
-                                      "speed. 50%%-150%% batch size increase for 20%%-50%% longer "
-                                      "training time. NB: Launch time will be significantly "
-                                      "delayed. Switching sides using ping-pong training will "
-                                      "take longer."})
+                              "help": "[Nvidia only] Trades off VRAM usage against computation "
+                                      "time. Can fit larger models into memory at a cost of "
+                                      "slower training speed. 50%%-150%% batch size increase for "
+                                      "20%%-50%% longer training time. NB: Launch time will be "
+                                      "significantly delayed. Switching sides using ping-pong "
+                                      "training will take longer."})
+        argument_list.append({"opts": ("-o", "--optimizer-savings"),
+                              "dest": "optimizer_savings",
+                              "action": "store_true",
+                              "default": False,
+                              "help": "[Nvidia only] To save VRAM some optimizer gradient "
+                                      "calculations can be performed on the CPU rather than the "
+                                      "GPU. This allows you to increase batchsize at a training "
+                                      "speed cost."})
+        argument_list.append({"opts": ("-pp", "--ping-pong"),
+                              "action": "store_true",
+                              "dest": "pingpong",
+                              "default": False,
+                              "help": "[Nvidia only] Enable ping pong training. Trains one side "
+                                      "at a time, switching sides at each save iteration. "
+                                      "Training will take 2 to 4 times longer, with about a "
+                                      "30%%-50%% reduction in VRAM useage. NB: Preview won't show "
+                                      "until both sides have been trained once."})
         argument_list.append({"opts": ("-wl", "--warp-to-landmarks"),
                               "action": "store_true",
                               "dest": "warp_to_landmarks",
@@ -1022,36 +1082,6 @@ class TrainArgs(FaceSwapArgs):
                                       "to color differences between the A and B sets, at an "
                                       "increased training time cost. Enable this option to "
                                       "disable color augmentation."})
-        argument_list.append({"opts": ("-tia", "--timelapse-input-A"),
-                              "action": DirFullPaths,
-                              "dest": "timelapse_input_a",
-                              "default": None,
-                              "help": "For if you want a timelapse: "
-                                      "The input folder for the timelapse. "
-                                      "This folder should contain faces of A "
-                                      "which will be converted for the "
-                                      "timelapse. You must supply a "
-                                      "--timelapse-output and a "
-                                      "--timelapse-input-B parameter."})
-        argument_list.append({"opts": ("-tib", "--timelapse-input-B"),
-                              "action": DirFullPaths,
-                              "dest": "timelapse_input_b",
-                              "default": None,
-                              "help": "For if you want a timelapse: "
-                                      "The input folder for the timelapse. "
-                                      "This folder should contain faces of B "
-                                      "which will be converted for the "
-                                      "timelapse. You must supply a "
-                                      "--timelapse-output and a "
-                                      "--timelapse-input-A parameter."})
-        argument_list.append({"opts": ("-to", "--timelapse-output"),
-                              "action": DirFullPaths,
-                              "dest": "timelapse_output",
-                              "default": None,
-                              "help": "The output folder for the timelapse. "
-                                      "If the input folders are supplied but "
-                                      "no output folder, it will default to "
-                                      "your model folder /timelapse/"})
         return argument_list
 
 

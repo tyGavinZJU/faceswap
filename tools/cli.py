@@ -390,13 +390,28 @@ class EffmpegArgs(FaceSwapArgs):
         return argument_list
 
 
+class RestoreArgs(FaceSwapArgs):
+    """ Class to restore model files from backup """
+
+    @staticmethod
+    def get_argument_list():
+        """ Put the arguments in a list so that they are accessible from both argparse and gui """
+        argument_list = list()
+        argument_list.append({"opts": ("-m", "--model-dir"),
+                              "action": DirFullPaths,
+                              "dest": "model_dir",
+                              "required": True,
+                              "help": "Model directory. A directory containing the model "
+                                      "you wish to restore from backup."})
+        return argument_list
+
+
 class SortArgs(FaceSwapArgs):
     """ Class to parse the command line arguments for sort tool """
 
     @staticmethod
     def get_argument_list():
-        """ Put the arguments in a list so that they are accessible from both
-        argparse and gui """
+        """ Put the arguments in a list so that they are accessible from both argparse and gui """
         argument_list = list()
         argument_list.append({"opts": ('-i', '--input'),
                               "action": DirFullPaths,
@@ -527,11 +542,10 @@ class SortArgs(FaceSwapArgs):
         argument_list.append({"opts": ("-be", "--backend"),
                               "action": Radio,
                               "type": str.upper,
-                              "choices": ("CPU", "OPENCL"),
-                              "default": "CPU",
-                              "help": "Backend to use for VGG Face inference. OpenCL is slightly "
-                                      "faster but may not be available on all systems. Only used "
-                                      "for sort by 'face'."})
+                              "choices": ("CPU", "GPU"),
+                              "default": "GPU",
+                              "help": "Backend to use for VGG Face inference."
+                                      "Only used for sort by 'face'."})
 
         argument_list.append({"opts": ('-l', '--log-changes'),
                               "action": 'store_true',

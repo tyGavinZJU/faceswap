@@ -22,7 +22,7 @@ from lib.convert import Converter
 from lib.faces_detect import DetectedFace
 from lib.model.masks import get_available_masks
 from lib.multithreading import MultiThread
-from lib.utils import set_system_verbosity
+from lib.utils import FaceswapError, set_system_verbosity
 from lib.queue_manager import queue_manager
 from scripts.fsmedia import Alignments, Images
 from scripts.convert import Predict
@@ -184,6 +184,13 @@ class Samples():
         retval = [filename for filename in filelist
                   if self.alignments.frame_has_faces(os.path.basename(filename))]
         logger.debug("Filtered out frames: %s", self.images.images_found - len(retval))
+        try:
+            assert retval
+        except AssertionError as err:
+            msg = ("No faces were found in any of the frames passed in. Make sure you are passing "
+                   "in a frames source rather than extracted faces, and that you have provided "
+                   "the correct alignments file.")
+            raise FaceswapError(msg) from err
         return retval
 
     def get_indices(self):
@@ -536,12 +543,18 @@ class ConfigTools():
         """ Update config with selected values """
         for section, items in self.tk_vars.items():
             for item, value in items.items():
-                new_value = str(value.get())
+                try:
+                    new_value = str(value.get())
+                except tk.TclError as err:
+                    # When manually filling in text fields, blank values will
+                    # raise an error on numeric datatypes so return 0
+                    logger.debug("Error getting value. Defaulting to 0. Error: %s", str(err))
+                    new_value = str(0)
                 old_value = self.config.config[section][item]
                 if new_value != old_value:
                     logger.trace("Updating config: %s, %s from %s to %s",
                                  section, item, old_value, new_value)
-                    self.config.config[section][item] = str(value.get())
+                    self.config.config[section][item] = new_value
 
     def get_config_dicts(self):
         """ Hold a custom config dict for the config """

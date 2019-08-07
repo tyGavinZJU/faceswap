@@ -134,14 +134,13 @@ class Train():
 
             if self.args.allow_growth:
                 self.set_tf_allow_growth()
-
             model = self.load_model()
             trainer = self.load_trainer(model)
             self.run_training_cycle(model, trainer)
         except KeyboardInterrupt:
             try:
                 logger.debug("Keyboard Interrupt Caught. Saving Weights and exiting")
-                model.save_models(False)
+                model.save_models()
                 trainer.clear_tensorboard()
             except KeyboardInterrupt:
                 logger.info("Saving model weights has been cancelled!")
@@ -157,8 +156,9 @@ class Train():
         augment_color = not self.args.no_augment_color
         model = PluginLoader.get_model(self.trainer_name)(
             model_dir,
-            self.args.gpus,
+            gpus=self.args.gpus,
             configfile=configfile,
+            snapshot_interval=self.args.snapshot_interval,
             no_logs=self.args.no_logs,
             warp_to_landmarks=self.args.warp_to_landmarks,
             augment_color=augment_color,
@@ -168,6 +168,7 @@ class Train():
             preview_scale=self.args.preview_scale,
             pingpong=self.args.pingpong,
             memory_saving_gradients=self.args.memory_saving_gradients,
+            optimizer_savings=self.args.optimizer_savings,
             predict=False)
         logger.debug("Loaded Model")
         return model
@@ -214,9 +215,6 @@ class Train():
 
         for iteration in range(0, self.args.iterations):
             logger.trace("Training iteration: %s", iteration)
-            snapshot_iteration = bool(self.args.snapshot_interval != 0 and
-                                      iteration >= self.args.snapshot_interval and
-                                      iteration % self.args.snapshot_interval == 0)
             save_iteration = iteration % self.args.save_interval == 0
             viewer = display_func if save_iteration or self.save_now else None
             timelapse = self.timelapse if save_iteration else None
@@ -227,16 +225,16 @@ class Train():
             if save_iteration:
                 logger.trace("Save Iteration: (iteration: %s", iteration)
                 if self.args.pingpong:
-                    model.save_models(snapshot_iteration)
+                    model.save_models()
                     trainer.pingpong.switch()
                 else:
-                    model.save_models(snapshot_iteration)
+                    model.save_models()
             elif self.save_now:
                 logger.trace("Save Requested: (iteration: %s", iteration)
-                model.save_models(False)
+                model.save_models()
                 self.save_now = False
         logger.debug("Training cycle complete")
-        model.save_models(False)
+        model.save_models()
         trainer.clear_tensorboard()
         self.stop = True
 
